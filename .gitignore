@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/
+.gemini/
+.vscode/
+.idea/
+*.log
+scratch/
+metrics.csv
+benchmark_data.py
+benchmark_4bills.py
