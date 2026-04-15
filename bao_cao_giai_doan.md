@@ -1,353 +1,388 @@
-# Phân Tích Các Giai Đoạn Xử Lý – Hệ Thống Giám Sát An Ninh CamAI
+# Phân Tích Các Giai Đoạn Xử Lý – Pipeline OCR (VNCV)
 
-Hệ thống giám sát an ninh CamAI được xây dựng theo quy trình xử lý tuần tự gồm **6 giai đoạn chính**, tương ứng với **9 bước** được đánh dấu rõ ràng trong `video_generator()` của `main.py`. Mỗi giai đoạn đảm nhận một nhiệm vụ cụ thể, đảm bảo hệ thống hoạt động chính xác, ổn định và phản hồi theo thời gian thực.
+Hệ thống nhận dạng văn bản (OCR) được xây dựng theo quy trình xử lý **5 giai đoạn** được phân tách rõ ràng trong `ocr.py`. Kiến trúc tuân theo nguyên tắc **single-responsibility**: mỗi hàm đảm nhận đúng một nhiệm vụ, dễ kiểm thử và bảo trì. Ngôn ngữ đích: **Tiếng Việt** (`OCR_LANG = "vi"`, thư viện `vncv`).
 
 ---
 
 ## Sơ Đồ Tổng Quan Luồng Xử Lý
 
 ```
-📷 Camera / File Video
+📤 HTTP POST /api/ocr  (upload file ảnh)
         │
         ▼
-┌─────────────────────┐
-│  Giai đoạn 1        │  BƯỚC 1: Camera Stream
-│  Thu nhận dữ liệu   │  cap.read() → frame
-└────────┬────────────┘
+┌─────────────────────────┐
+│  Giai đoạn 0            │  Model warm-up (background thread)
+│  Khởi động Model        │  _do_warmup() → _vncv_extract ready
+└────────┬────────────────┘
          │
          ▼
-┌─────────────────────┐
-│  Giai đoạn 2        │  BƯỚC 2: Tiền xử lý
-│  Preprocessing      │  frame.copy() → disp_frame
-└────────┬────────────┘
+┌─────────────────────────┐
+│  Giai đoạn 1            │  router.py → Image.open()
+│  Thu nhận ảnh đầu vào   │  Decode bytes → PIL.Image RGB
+└────────┬────────────────┘
          │
          ▼
-┌─────────────────────┐
-│  Giai đoạn 3        │  BƯỚC 3 & 4: Detect + Track
-│  Detection &        │  model.track() → boxes, ids, confs
-│  Tracking           │  (Frame skipping % 2)
-└────────┬────────────┘
+┌─────────────────────────┐
+│  Giai đoạn 2            │  _preprocess() → standard / aggressive
+│  Tiền xử lý ảnh         │  Grayscale + Contrast + Resize
+└────────┬────────────────┘
          │
          ▼
-┌─────────────────────┐
-│  Giai đoạn 4        │  BƯỚC 5: Duyệt từng đối tượng
-│  ROI Processing     │  Point-in-Polygon Test (center)
-└────────┬────────────┘
+┌─────────────────────────┐
+│  Giai đoạn 3            │  _vncv_extract(tmp_path, lang="vi")
+│  OCR Engine (VNCV)      │  → list[dict{text, confidence}]
+└────────┬────────────────┘
          │
          ▼
-┌─────────────────────┐
-│  Giai đoạn 5        │  BƯỚC 6, 7 & 8: Quyết định
-│  Decision Making    │  hold_secs + cooldown → alert
-└────────┬────────────┘
+┌─────────────────────────┐
+│  Giai đoạn 4            │  _clean(items) → lọc rác + dedup
+│  Lọc & Làm Sạch         │  → (text: str, confidence: float)
+└────────┬────────────────┘
          │
          ▼
-┌─────────────────────┐
-│  Giai đoạn 6        │  BƯỚC 9: Output
-│  Output & Alert     │  MJPEG stream + Telegram + SSE
-└─────────────────────┘
+┌─────────────────────────┐
+│  Giai đoạn 5            │  extract_text() → auto-retry logic
+│  Chuẩn Hóa Đầu Ra       │  OCRResult → JSON response
+└─────────────────────────┘
+         │
+         ▼
+📥 JSON { text, confidence, mode, elapsed_ms, char_count }
 ```
 
 ---
 
-## Giai Đoạn 1 – Thu Nhận Dữ Liệu (Input)
+## Giai Đoạn 0 – Khởi Động Model (Warm-up)
 
-Camera hoặc file video là nguồn dữ liệu đầu vào. Từng frame được đọc liên tục theo thời gian thực thông qua OpenCV. Hệ thống hỗ trợ hai trường hợp:
+Mô hình OCR (`vncv`) có độ trễ khởi tạo lớn ở lần gọi đầu tiên do phải load weights ONNX vào bộ nhớ. Để tránh người dùng phải chờ khi gửi ảnh lần đầu, hệ thống thực hiện **warm-up không đồng bộ** trong một **daemon thread** ngay khi module được import.
 
-- **Webcam thực tế** (`CAMERA_SOURCE = 0`): đọc trực tiếp từ thiết bị phần cứng, dùng backend `cv.CAP_DSHOW` trên Windows để ổn định hơn.
-- **File video** (ví dụ `test.mp4` hoặc `2.mp4`): dùng để kiểm thử, tự động tua lại khi hết (`CAP_PROP_POS_FRAMES = 0`).
+Quá trình warm-up:
+1. Tạo ảnh giả `64×64` pixel trắng (dummy image).
+2. Lưu tạm vào `tempfile` rồi gọi `_vncv_extract()` một lần.
+3. Set `threading.Event(_warmup_done)` để báo hiệu hoàn tất.
 
-Nếu mất kết nối hoặc không đọc được frame, hệ thống không dừng mà `time.sleep(0.05)` rồi thử lại ở frame tiếp theo, đảm bảo giám sát liên tục không bị gián đoạn.
+Các lần gọi OCR thật sau đó sẽ `wait()` trên Event này (tối đa `WARMUP_TIMEOUT = 30s`), đảm bảo model luôn sẵn sàng.
 
-Sau khi mở nguồn video thành công, hệ thống cấu hình độ phân giải chuẩn `640×480` và FPS mong muốn là **30 FPS** để đồng bộ với tốc độ xử lý.
-
-**Code trọng tâm – `main.py` (Bước 1):**
+**Code trọng tâm – `ocr.py`:**
 
 ```python
-# config.py: CAMERA_SOURCE = 0 (webcam) hoặc "test.mp4" (file video)
-if isinstance(CAMERA_SOURCE, str):
-    cap = cv.VideoCapture(CAMERA_SOURCE)                # Nguồn: file video
-else:
-    cap = cv.VideoCapture(CAMERA_SOURCE, cv.CAP_DSHOW)  # Nguồn: webcam (Windows)
+_warmup_done  = threading.Event()
+_vncv_extract = None   # Hàm extract_text từ thư viện vncv, khởi tạo lazy
 
-# Cấu hình độ phân giải và FPS mặc định
-cap.set(cv.CAP_PROP_FRAME_WIDTH,  FRAME_W)  # 640px
-cap.set(cv.CAP_PROP_FRAME_HEIGHT, FRAME_H)  # 480px
-cap.set(cv.CAP_PROP_FPS, 30)
+def _do_warmup() -> None:
+    global _vncv_extract
+    try:
+        with _silence():                          # Tắt log noise từ ONNX/TF
+            from vncv import extract_text as _fn
+            _vncv_extract = _fn
+            # Tạo ảnh giả để "hâm nóng" model
+            dummy = Image.new("RGB", (64, 64), color=255)
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+                dummy.save(f, format="JPEG")
+                p = f.name
+            _fn(p, lang=config.OCR_LANG, return_dict=True)   # Lần gọi đầu = warm-up
+            os.remove(p)
+    except Exception:
+        pass   # Warm-up fail không crash app
+    finally:
+        _warmup_done.set()   # Báo hiệu cho các thread khác biết model đã sẵn sàng
 
-# Vòng lặp chính: đọc liên tục từng frame
-ok, frame = cap.read()
-if not ok:
-    if isinstance(CAMERA_SOURCE, str):  # Hết video → tua lại từ đầu
-        cap.set(cv.CAP_PROP_POS_FRAMES, 0)
-    else:                               # Mất tín hiệu → chờ và thử lại
-        time.sleep(0.05)
-    continue
+# Chạy ngay khi import module (daemon = tự tắt khi app thoát)
+threading.Thread(target=_do_warmup, daemon=True, name="ocr-warmup").start()
 ```
+
+> **Thiết kế đáng chú ý:** `_silence()` là context manager dùng `os.dup2()` để redirect cả `stderr` ở cấp C-extension (không chỉ Python), giúp chặn hoàn toàn log noise từ ONNX Runtime và TensorFlow mà các `contextlib.redirect_stderr()` thông thường không làm được.
 
 ---
 
-## Giai Đoạn 2 – Tiền Xử Lý (Preprocessing)
+## Giai Đoạn 1 – Thu Nhận Ảnh Đầu Vào (Input)
 
-Trước khi đưa frame vào mô hình AI, hệ thống thực hiện bước tiền xử lý nhằm chuẩn hóa dữ liệu và bảo toàn frame gốc.
+Ảnh được gửi qua `HTTP POST /api/ocr` dưới dạng `multipart/form-data`. `router.py` đảm nhận việc validate và decode ảnh trước khi đưa vào pipeline OCR.
 
-Khi gọi `model.track(frame, ...)`, thư viện **Ultralytics** tự động thực hiện pipeline chuẩn hóa nội bộ:
-- **Resize / Scale**: đưa frame về `640×640` phù hợp với YOLOv8.
-- **Normalize**: chuẩn hóa giá trị pixel từ `[0–255]` về `[0.0–1.0]`.
-- **Padding (letterbox)**: giữ tỉ lệ khung hình, bổ sung vùng đệm nếu cần.
+Hệ thống kiểm tra `Content-Type` phải là `image/*`, sau đó dùng **Pillow** để decode bytes thành `PIL.Image` và ép về chế độ màu `RGB` (thống nhất đầu vào, loại bỏ alpha channel của PNG).
 
-Hệ thống áp dụng kỹ thuật **frame skipping** (`frame_count % 2 == 1`): chỉ chạy model AI trên frame lẻ. Các frame chẵn tái sử dụng kết quả `last_boxes`, `last_ids`, `last_confs` từ frame trước, giúp giảm tải CPU/GPU trên máy tính cấu hình thấp.
-
-Frame được sao chép (`frame.copy()`) để bảo toàn dữ liệu gốc; mọi annotation (khung bbox, nhãn, chấm tâm) đều được vẽ lên bản sao `disp_frame`.
-
-**Code trọng tâm – `main.py` (Bước 2):**
+**Code trọng tâm – `router.py`:**
 
 ```python
-# Bảo toàn frame gốc cho model, chỉ vẽ lên bản sao
-disp_frame = frame.copy()
+@ocr_router.post("/ocr")
+async def ocr_endpoint(file: UploadFile = File(...)) -> dict:
+    # Bước 1: Validate Content-Type
+    if file.content_type and not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=415, detail="File must be an image")
 
-# Bộ đệm kết quả của frame trước (dùng khi frame skipping)
-last_boxes = []   # Tọa độ bounding box
-last_ids   = []   # Track ID
-last_confs = []   # Độ tin cậy
+    raw = await file.read()   # Đọc toàn bộ bytes của file upload
+
+    # Bước 2: Decode bytes → PIL.Image
+    try:
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        # .convert("RGB"): chuẩn hóa sang 3 kênh, xử lý được cả PNG có alpha
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Cannot decode image: {e}")
+
+    print(f"[API] Bắt đầu nhận dạng ảnh: {file.filename} (Kích thước: {img.size})")
+
+    # Bước 3: Gọi pipeline OCR
+    result: OCRResult = extract_text(img)
 ```
+
+**Định dạng ảnh hỗ trợ:** JPEG, PNG, WEBP, BMP (bất kỳ định dạng nào Pillow đọc được).
 
 ---
 
-## Giai Đoạn 3 – Phát Hiện và Theo Dõi Đối Tượng (Detection & Tracking)
+## Giai Đoạn 2 – Tiền Xử Lý Ảnh (Preprocessing)
 
-Hệ thống sử dụng mô hình **YOLOv8n** (`yolov8n.pt`) để phát hiện người trong từng frame. Kết quả trả về gồm:
+Đây là giai đoạn quan trọng nhất quyết định chất lượng OCR. Hệ thống có **hai chế độ tiền xử lý** tương ứng với hai mức độ xử lý:
 
-| Thông tin | Kiểu dữ liệu | Mô tả |
-|-----------|-------------|-------|
-| **Bounding Box** | `float[4]` – `[x1, y1, x2, y2]` | Tọa độ hình chữ nhật bao quanh đối tượng |
-| **Confidence** | `float` – `[0.0–1.0]` | Độ tin cậy phát hiện, ngưỡng `conf=0.4` |
-| **Track ID** | `int` | Mã định danh duy nhất, duy trì ổn định qua nhiều frame |
+### 2a – Chế Độ Standard (Mặc định)
 
-Sử dụng **Tracking** (không chỉ Detect) mang lại hai lợi ích:
-1. **Tránh đếm lặp**: cùng một người chỉ có một Track ID duy nhất.
-2. **Đo thời gian chính xác**: biết được đối tượng đã đứng trong vùng cấm bao nhiêu giây dựa trên ID đó.
+| Bước | Kỹ thuật | Tham số |
+|------|---------|---------|
+| Grayscale | `img.convert("L")` | — |
+| Auto Contrast | `ImageOps.autocontrast(cutoff=1)` | `STANDARD_CONTRAST_CUTOFF = 1` |
+| Sharpening | `UnsharpMask` | radius=1.5, percent=120, threshold=3 |
+| Resize | `_resize()` | Min 640px, Max 1280px cạnh dài |
+| Convert back | `.convert("RGB")` | Trả về RGB cho VNCV |
 
-Model được bảo vệ bằng `threading.Lock()` để tránh race condition khi đa luồng (SSE + video stream chạy song song). Chỉ nhận diện class `"person"` (lọc qua `PERSON_CLS`).
+### 2b – Chế Độ Aggressive (Khi Standard yếu)
 
-**Code trọng tâm – `main.py` (Bước 3 & 4):**
+Được kích hoạt tự động khi confidence của Standard mode thấp hơn `CONF_THRESHOLD = 0.40` hoặc ít hơn `MIN_CHARS = 30` ký tự:
+
+| Bước | Kỹ thuật | Tham số |
+|------|---------|---------|
+| Grayscale | `img.convert("L")` | — |
+| Auto Contrast | `autocontrast(cutoff=0)` | Không cắt histogram |
+| Contrast Boost | `ImageEnhance.Contrast` | Factor = **2.5x** |
+| Binarization | `img.point(lambda px: 0 if px < 128 else 255)` | `AGGRESSIVE_BINARIZE_THR = 128` |
+| Resize | `_resize()` | Min 640px, Max 1280px |
+
+### Logic Resize Thông Minh (`_resize`)
 
 ```python
-# Frame skipping: chỉ chạy model AI trên frame lẻ
-if frame_count % 2 == 1 or len(last_boxes) == 0:
-    with model_lock:  # Thread-safe: tránh race condition khi đa luồng
-        results = model.track(
-            frame,
-            persist=True,       # Giữ track_id ổn định qua nhiều frame
-            verbose=False,
-            classes=PERSON_CLS, # Chỉ nhận diện class "person"
-            conf=0.4            # Bỏ qua phát hiện có độ tin cậy < 40%
-        )
-
-# Trích xuất kết quả phát hiện + tracking
-if results[0].boxes is not None and results[0].boxes.id is not None:
-    last_boxes = results[0].boxes.xyxy.cpu().numpy()       # Tọa độ [x1, y1, x2, y2]
-    last_ids   = results[0].boxes.id.int().cpu().tolist()  # Track ID duy nhất
-    last_confs = results[0].boxes.conf.cpu().numpy()       # Độ tin cậy
-else:
-    last_boxes, last_ids, last_confs = [], [], []
+def _resize(img: Image.Image) -> Image.Image:
+    w, h = img.size
+    long_s, short_s = max(w, h), min(w, h)
+    if long_s > config.MAX_SIDE:        # Ảnh quá lớn → thu nhỏ
+        scale = config.MAX_SIDE / long_s
+    elif short_s < config.MIN_SIDE:     # Ảnh quá nhỏ → phóng to
+        scale = config.MIN_SIDE / short_s
+        if max(w * scale, h * scale) > config.MAX_SIDE * 1.5:
+            return img                  # Tránh phóng to quá mức (bảo toàn tỉ lệ)
+    else:
+        return img                      # Đã trong ngưỡng → giữ nguyên
+    return img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
 ```
 
----
-
-## Giai Đoạn 4 – Phân Tích Vùng Cấm (ROI Processing)
-
-Hệ thống kiểm tra xem đối tượng có đang đứng trong vùng cấm (**Region of Interest – ROI**) hay không. Vùng cấm do người dùng tự vẽ trên giao diện web dưới dạng **đa giác (polygon)** và được lưu vào `zone.json` thông qua API `POST /api/zone` trong `router.py`.
-
-**Bước quy đổi tọa độ (Scale):** Tọa độ vùng cấm được lưu theo độ phân giải chuẩn `640×480`. Hệ thống tính tỉ lệ `sx = sw / FRAME_W` và `sy = sh / FRAME_H` để quy đổi sang kích thước thực tế của frame từ camera.
-
-**Điểm đại diện:** Tâm (center) của Bounding Box được dùng làm điểm đại diện vị trí đối tượng:
-
-$$c_x = \frac{x_1 + x_2}{2}, \quad c_y = \frac{y_1 + y_2}{2}$$
-
-**Thuật toán Point-in-Polygon Test** (`cv.pointPolygonTest`):
-- Kết quả `≥ 0` → điểm nằm **TRONG hoặc TRÊN cạnh** của đa giác → **Xâm nhập**.
-- Kết quả `< 0` → điểm nằm **NGOÀI** đa giác → **An toàn**.
-
-Màu sắc bounding box thay đổi theo trạng thái: **đỏ** `(0, 0, 255)` khi xâm nhập, **xanh** `(0, 255, 0)` khi an toàn.
-
-**Code trọng tâm – `main.py` (Bước 5):**
+**Code trọng tâm – `ocr.py`:**
 
 ```python
-# Bước 1: Scale tọa độ vùng cấm về đúng kích thước frame thực
-sh, sw = frame.shape[:2]
-sx, sy = sw / FRAME_W, sh / FRAME_H
-scaled_zone = np.array(
-    [[int(p[0] * sx), int(p[1] * sy)] for p in router.zone_points],
-    dtype=np.int32,
-)
-has_zone = len(scaled_zone) >= 3  # Cần ít nhất 3 điểm để tạo polygon
+def _preprocess(img: Image.Image, aggressive: bool = False) -> Image.Image:
+    cutoff = 0 if aggressive else config.STANDARD_CONTRAST_CUTOFF   # 0 hoặc 1
+    gray = ImageOps.autocontrast(img.convert("L"), cutoff=cutoff)
 
-# Bước 2: Duyệt từng đối tượng, tính tâm Bounding Box
-for box, tid, conf in zip(last_boxes, last_ids, last_confs):
-    x1, y1, x2, y2 = map(int, box)
-    cx = (x1 + x2) // 2  # Tọa độ X tâm
-    cy = (y1 + y2) // 2  # Tọa độ Y tâm
-
-    # Bước 3: Kiểm tra tâm có nằm trong polygon vùng cấm không
-    is_inside = False
-    if has_zone:
-        is_inside = cv.pointPolygonTest(
-            scaled_zone,
-            (float(cx), float(cy)),
-            False    # False = chỉ trả về dấu (+/-), không tính khoảng cách
-        ) >= 0
-
-    # Đổi màu theo trạng thái
-    color = (0, 0, 255) if is_inside else (0, 255, 0)  # Đỏ : Xanh
-    cv.rectangle(disp_frame, (x1, y1), (x2, y2), color, 2)
-    cv.circle(disp_frame, (cx, cy), 5, color, -1)
-    cv.putText(disp_frame, f"ID:{tid}", (x1, max(20, y1 - 8)),
-               cv.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+    if aggressive:
+        # Chế độ mạnh: tăng contrast cực đại + nhị phân hóa
+        gray = ImageEnhance.Contrast(gray).enhance(config.AGGRESSIVE_CONTRAST)  # 2.5x
+        gray = gray.point(lambda px: 0 if px < config.AGGRESSIVE_BINARIZE_THR else 255)
+    else:
+        # Chế độ chuẩn: làm nét bằng UnsharpMask (giữ gradient)
+        gray = gray.filter(ImageFilter.UnsharpMask(
+            radius=config.UNSHARP_RADIUS,       # 1.5
+            percent=config.UNSHARP_PERCENT,     # 120
+            threshold=config.UNSHARP_THRESHOLD, # 3
+        ))
+    return _resize(gray).convert("RGB")   # Scale về kích thước hợp lý
 ```
 
 ---
 
-## Giai Đoạn 5 – Xử Lý Logic Xâm Nhập (Decision Making)
+## Giai Đoạn 3 – OCR Engine (VNCV)
 
-Hệ thống không đưa ra cảnh báo ngay lập tức mà áp dụng **hai điều kiện thời gian** để tăng độ chính xác và tránh cảnh báo sai:
+Sau khi tiền xử lý, ảnh được lưu tạm vào **tempfile** trên ổ đĩa (do VNCV yêu cầu đường dẫn file, không nhận binary stream), sau đó engine OCR được gọi để trích xuất text.
 
-| Tham số | Giá trị mặc định | Vai trò |
-|---------|-----------------|---------|
-| `ZONE_HOLD_SECS` | `3.0 giây` | Đứng trong zone đủ thời gian này mới tính là xâm nhập |
-| `ZONE_COOLDOWN` | `5 giây` | Chờ đủ thời gian này giữa hai lần cảnh báo cùng track_id |
-| `ZONE_MISS_TOLERANCE` | `15 frame` | Số frame vắng mặt tối đa trước khi reset trạng thái zone |
+Hàm `_vncv_extract(tmp, lang="vi", return_dict=True)` trả về danh sách các item, mỗi item là một `dict` chứa:
 
-**Cơ chế `zone_missed`**: Hệ thống không reset ngay khi đối tượng tạm biến mất khỏi zone (do bị che khuất, nhiễu tracking). Chỉ khi vắng mặt liên tục `> 15 frame` thì mới xóa bộ đếm thời gian (`zone_enter_times`). Điều này tránh reset sai khi đối tượng thực sự vẫn đứng đó.
+```python
+{
+    "text":       "Nội dung dòng văn bản",
+    "confidence": 0.87   # float 0.0 – 1.0
+}
+```
 
-**Luồng quyết định:**
+Toàn bộ quá trình được bọc trong `_silence()` để che các log noise từ thư viện C/ONNX Runtime ra console.
+
+**Code trọng tâm – `ocr.py`:**
+
+```python
+def _run(img: Image.Image, aggressive: bool = False) -> OCRResult:
+    tmp = None
+    t0  = time.perf_counter()
+    try:
+        # Chờ warm-up xong (tối đa WARMUP_TIMEOUT = 30 giây)
+        _warmup_done.wait(timeout=config.WARMUP_TIMEOUT)
+        if _vncv_extract is None:               # Fallback nếu warm-up chưa kịp chạy
+            with _silence():
+                from vncv import extract_text as _fn
+                _vncv_extract = _fn
+
+        # Tiền xử lý ảnh (standard hoặc aggressive)
+        processed = _preprocess(img, aggressive)
+
+        # Lưu ảnh đã xử lý vào tempfile để engine đọc
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            processed.save(f, format="JPEG", quality=config.OCR_QUALITY)  # quality=85
+            tmp = f.name
+
+        # Gọi engine OCR (tiếng Việt, trả dict)
+        with _silence():
+            items = _vncv_extract(tmp, lang=config.OCR_LANG, return_dict=True) or []
+
+        text, conf = _clean(items)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        return OCRResult(text=text, confidence=conf, mode=mode, elapsed_ms=round(elapsed_ms, 1))
+    finally:
+        # Dọn sạch tempfile dù thành công hay thất bại
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+```
+
+---
+
+## Giai Đoạn 4 – Lọc và Làm Sạch Văn Bản (Text Cleaning)
+
+Kết quả thô từ OCR engine thường chứa nhiễu: ký tự rác, dòng trùng lặp, nhãn logo, ký tự đặc biệt vô nghĩa. Hàm `_clean()` áp dụng **4 lớp lọc** tuần tự:
+
+| Lớp lọc | Điều kiện loại bỏ | Regex / Logic |
+|---------|------------------|---------------|
+| **Rác ký tự** | Dòng chỉ gồm ≤ 3 ký tự không phải chữ/số | `^[^\w\d]{0,3}$` |
+| **Không có chữ/số** | Dòng không chứa bất kỳ `\w` nào | `re.search(r"[\w\d]", ln)` |
+| **Logo ngắn** | Chuỗi 2–8 ký tự không dấu cách, không có số | `^\S{2,8}$` + no digit |
+| **Trùng lặp (Dedup)** | Cùng nội dung (lowercase, bỏ khoảng trắng) | Sliding window `DEDUP_WINDOW = 20` |
+
+Sau khi lọc, các dòng còn lại được nối bằng `\n` và tính **confidence trung bình** từ toàn bộ dòng hợp lệ.
+
+**Code trọng tâm – `ocr.py`:**
+
+```python
+_JUNK = re.compile(r"^[^\w\d]{0,3}$", re.UNICODE)  # ≤3 ký tự rác
+_LOGO = re.compile(r"^\S{2,8}$")                    # Chuỗi ngắn không dấu cách
+
+def _clean(raw_items: list) -> tuple[str, float]:
+    lines, confs, seen = [], [], set()
+    for item in raw_items:
+        ln   = str(item.get("text", "") if isinstance(item, dict) else item).strip()
+        conf = float(item.get("confidence", 0)) if isinstance(item, dict) else 0.0
+
+        if not ln or _JUNK.match(ln):                       # Lọc 1: ký tự rác
+            continue
+        if not re.search(r"[\w\d]", ln, re.UNICODE):        # Lọc 2: không có chữ/số
+            continue
+        if _LOGO.match(ln) and not re.search(r"\d", ln):    # Lọc 3: logo ngắn
+            continue
+
+        # Lọc 4: Dedup bằng sliding window
+        key = re.sub(r"\s+", "", ln.lower())                # Chuẩn hóa key
+        if key in seen:
+            continue
+        seen.add(key)
+        if len(seen) > config.DEDUP_WINDOW:                 # Giữ cửa sổ 20 key
+            seen.pop()
+
+        lines.append(re.sub(r" {2,}", " ", ln))             # Nén khoảng trắng thừa
+        confs.append(conf)
+
+    text = "\n".join(lines)
+    avg  = sum(confs) / len(confs) if confs else 0.0
+    return text, avg
+```
+
+---
+
+## Giai Đoạn 5 – Chuẩn Hóa Đầu Ra & Auto-Retry (Output)
+
+Đây là **lớp quyết định cuối cùng** của pipeline. Hàm `extract_text()` (Public API) tự động thử lại với chế độ `aggressive` nếu kết quả `standard` không đủ tốt.
+
+### Logic Auto-Retry
 
 ```
-Đối tượng vào zone (is_inside = True)
+extract_text(img)
     │
-    ├── [Lần đầu] → lưu zone_enter_times[tid] = now
+    ├── Chạy _run(img, aggressive=False)  →  result_standard
     │
-    ├── time_in_zone = now - zone_enter_times[tid]
+    ├── Kết quả đủ tốt?
+    │     • KHÔNG có lỗi
+    │     • confidence ≥ 0.40  (CONF_THRESHOLD)
+    │     • độ dài ≥ 30 chars  (MIN_CHARS)
+    │         │
+    │         └─ ✅ TRẢ VỀ result_standard ngay
     │
-    ├── time_in_zone >= hold_secs (3s)?
-    │       VÀ (now - last_alert[tid]) >= cooldown (5s)?
-    │           │
-    │           └─► GỬI CẢNH BÁO → zone_last_alert[tid] = now
-    │                               Lưu ảnh hiện trường
-    │                               dispatch_alert()
-    └── Chưa đủ điều kiện → bỏ qua, frame tiếp theo tiếp tục kiểm tra
-
-Đối tượng ngoài zone (is_inside = False)
-    ├── zone_missed[tid] += 1
-    └── zone_missed[tid] > 15 → xóa zone_enter_times[tid]
+    └── Kết quả yếu → Chạy _run(img, aggressive=True)  →  result_aggressive
+            │
+            ├── r2.confidence > r.confidence     → Dùng aggressive
+            ├── len(r2.text) > len(r.text) * 1.2 → Dùng aggressive (nhiều text hơn 20%)
+            └── Ngược lại                        → Giữ standard (tránh overprocess)
 ```
 
-**Code trọng tâm – `main.py` (Bước 6, 7 & 8):**
+**Code trọng tâm – `ocr.py`:**
 
 ```python
-if is_inside:
-    anyone_inside = True
-    state["zone_missed"][tid] = 0          # Đang trong zone → reset missed counter
+def extract_text(img: Image.Image) -> OCRResult:
+    """Run OCR, auto-retry with aggressive preprocessing if standard is weak."""
+    r = _run(img)   # Thử chế độ standard trước
 
-    # Ghi nhận thời điểm lần đầu bước vào vùng cấm
-    if tid not in state["zone_enter_times"]:
-        state["zone_enter_times"][tid] = now
+    # Kiểm tra xem kết quả đã đủ tốt chưa
+    if r.error or (r.confidence >= config.CONF_THRESHOLD and len(r.text) >= config.MIN_CHARS):
+        return r   # Đủ tốt → trả về ngay
 
-    time_in_zone  = now - state["zone_enter_times"][tid]
-    hold_secs     = state["zone_hold_secs"]
-    cooldown_secs = state["zone_cooldown"]
-    last_tid_alert = state["zone_last_alert"].get(tid, 0)
+    # Kết quả yếu → thử lại với aggressive preprocessing
+    log.info(f"Weak result (conf={r.confidence:.2f}, chars={len(r.text)}) → trying aggressive")
+    r2 = _run(img, aggressive=True)
 
-    # Điều kiện kép: đủ thời gian lưu trú VÀ hết cooldown
-    if (time_in_zone >= hold_secs) and (now - last_tid_alert >= cooldown_secs):
-        state["zone_last_alert"][tid] = now  # Đánh dấu đã báo động
+    # So sánh hai kết quả, chọn cái tốt hơn
+    return r2 if (r2.confidence > r.confidence or len(r2.text) > len(r.text) * 1.2) else r
+```
 
-        # Ghi bằng chứng ảnh hiện trường
-        img_filename = f"zone_{tid}_{int(now)}.jpg"
-        img_path = os.path.join(OUTPUT_DIR, img_filename)
-        cv.imwrite(img_path, disp_frame.copy())
+### Cấu Trúc Dữ Liệu Đầu Ra
 
-        print(f"[{time.strftime('%H:%M:%S')}] BÁO ĐỘNG | ID={tid} | {time_in_zone:.1f}s")
-        dispatch_alert(img_path, tid, is_intrusion=True)
-else:
-    # Tăng đếm frame vắng mặt
-    state["zone_missed"][tid] = state["zone_missed"].get(tid, 0) + 1
-    if state["zone_missed"][tid] > ZONE_MISS_TOLERANCE:   # > 15 frame
-        state["zone_enter_times"].pop(tid, None)
-        state["zone_alerted"].discard(tid)
+```python
+@dataclass(slots=True)
+class OCRResult:
+    text:       str            # Văn bản đã làm sạch
+    confidence: float          # Độ tin cậy trung bình (0.0 – 1.0)
+    mode:       str            # "standard" | "aggressive"
+    elapsed_ms: float          # Thời gian xử lý (ms)
+    error:      Optional[str]  # None nếu thành công
+```
+
+**JSON Response từ API (`router.py`):**
+
+```json
+{
+    "text":       "Nội dung văn bản trích xuất...",
+    "confidence": 0.8732,
+    "mode":       "standard",
+    "elapsed_ms": 423.5,
+    "char_count": 156
+}
 ```
 
 ---
 
-## Giai Đoạn 6 – Gửi Cảnh Báo (Output & Alert)
+## Tổng Kết Các Tham Số Cấu Hình (`config.py`)
 
-Khi xác định có hành vi xâm nhập, hệ thống đồng thời thực hiện **ba hành động song song**:
+| Tham số | Giá trị | Ý nghĩa |
+|---------|---------|---------|
+| `CONF_THRESHOLD` | `0.40` | Ngưỡng confidence tối thiểu để chấp nhận kết quả standard |
+| `MIN_CHARS` | `30` | Số ký tự tối thiểu để coi là kết quả đủ tốt |
+| `MIN_SIDE` | `640 px` | Scale up nếu cạnh ngắn nhỏ hơn giá trị này |
+| `MAX_SIDE` | `1280 px` | Scale down nếu cạnh dài lớn hơn giá trị này |
+| `STANDARD_CONTRAST_CUTOFF` | `1` | Cắt histogram autocontrast ở chế độ standard |
+| `AGGRESSIVE_CONTRAST` | `2.5` | Hệ số tăng contrast ở chế độ aggressive |
+| `AGGRESSIVE_BINARIZE_THR` | `128` | Ngưỡng nhị phân hóa pixel (0–255) |
+| `UNSHARP_RADIUS` | `1.5` | Bán kính kernel UnsharpMask |
+| `UNSHARP_PERCENT` | `120` | Cường độ làm nét (%) |
+| `UNSHARP_THRESHOLD` | `3` | Ngưỡng tương phản tối thiểu để áp dụng làm nét |
+| `OCR_LANG` | `"vi"` | Ngôn ngữ nhận dạng: Tiếng Việt |
+| `OCR_QUALITY` | `85` | Chất lượng JPEG khi lưu tempfile cho engine |
+| `WARMUP_TIMEOUT` | `30 s` | Thời gian tối đa chờ model warm-up |
+| `DEDUP_WINDOW` | `20` | Kích thước sliding window khử trùng lặp |
 
-1. **Lưu ảnh hiện trường** vào thư mục `alerts/` với tên `zone_{tid}_{timestamp}.jpg`, kèm annotation (khung đỏ, chấm tâm, nhãn ID).
-2. **Gửi cảnh báo Telegram** kèm ảnh và thông tin chi tiết qua `telegram_utils.send_formatted_intrusion_alert()`.
-3. **Cập nhật Web Dashboard** theo thời gian thực qua **Server-Sent Events (SSE)** tại endpoint `GET /api/alerts`.
-
-Quá trình gửi Telegram được xử lý trong **thread riêng** (`threading.Thread(daemon=True)`), đảm bảo hệ thống không bị treo trong khi chờ phản hồi từ mạng (timeout = 15 giây). Video stream MJPEG được phục vụ qua endpoint `GET /api/stream`, trả về từng frame dưới định dạng `multipart/x-mixed-replace`.
-
-**Code trọng tâm – `telegram_utils.py`:**
-
-```python
-def send_formatted_intrusion_alert(photo_path, token, chat_id, track_id, is_intrusion, hold_secs):
-    timestamp = time.strftime("%H:%M:%S %d/%m/%Y")
-    title     = "🚨 CẢNH BÁO XÂM NHẬP 🚨" if is_intrusion else "🚨 PHÁT HIỆN NGƯỜI 🚨"
-    caption   = (
-        f"{title}\n"
-        f"{'─' * 30}\n"
-        f"👤 Đối tượng: #{track_id}\n"
-        f"⏱ Thời gian: {timestamp}"
-    )
-    # POST https://api.telegram.org/bot{token}/sendPhoto
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
-    with open(photo_path, "rb") as f:
-        res = requests.post(url, files={"photo": f},
-                            data={"chat_id": chat_id, "caption": caption}, timeout=15)
-    return True
-```
-
-**Code trọng tâm – `main.py` (Bước 9 – gửi không đồng bộ):**
-
-```python
-def dispatch_alert(img_path: str, track_id: int, is_intrusion: bool = False):
-    """Gửi cảnh báo trong thread riêng, không làm chậm luồng video chính."""
-    def _run():
-        telegram_utils.send_formatted_intrusion_alert(...)  # Gửi Telegram
-
-        # Gửi SSE cho trình duyệt (cập nhật dashboard real-time)
-        payload = json.dumps({
-            "id": track_id, "time": f"{date_str} {time_str}",
-            "msg": msg, "intrusion": is_intrusion,
-            "img_url": f"/alerts/{os.path.basename(img_path)}",
-        })
-        loop.create_task(_broadcast(payload))  # Broadcast tới tất cả SSE client
-
-    threading.Thread(target=_run, daemon=True).start()  # Chạy tách biệt
-
-# Bước 9: Encode và stream frame video
-_, buf = cv.imencode(".jpg", disp_frame, [cv.IMWRITE_JPEG_QUALITY, 85])
-yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
-
-# Cập nhật trạng thái SSE (số người + có xâm nhập không)
-dispatch_status(len(active_ids), anyone_inside)
-```
-
----
-
-## Tổng Kết Các Tham Số Cấu Hình
-
-| Tham số | File | Giá trị mặc định | Mô tả |
-|---------|------|-----------------|-------|
-| `CAMERA_SOURCE` | `config.py` | `0` (webcam) | Nguồn video đầu vào |
-| `MODEL_PATH` | `config.py` | `yolov8n.pt` | Đường dẫn model YOLOv8 |
-| `ZONE_HOLD_SECS` | `config.py` | `3.0 s` | Thời gian tối thiểu trong zone để báo động |
-| `ZONE_COOLDOWN` | `config.py` | `5 s` | Khoảng cách tối thiểu giữa hai cảnh báo |
-| `FRAME_W / FRAME_H` | `main.py` | `640 / 480` | Độ phân giải chuẩn của hệ thống |
-| `ZONE_MISS_TOLERANCE` | `main.py` | `15 frame` | Số frame vắng mặt trước khi reset zone |
-| `conf=0.4` | `main.py` | `0.4` | Ngưỡng tin cậy tối thiểu của YOLO |
-| `frame_count % 2` | `main.py` | — | Chỉ chạy AI trên frame lẻ (frame skipping) |
-| `JPEG_QUALITY` | `main.py` | `85` | Chất lượng encode ảnh stream |
-
-> **Lưu ý:** Các tham số `zone_hold_secs`, `zone_cooldown`, `telegram_token` và `telegram_chat_id` có thể được điều chỉnh trực tiếp qua giao diện web (API `POST /api/config`) mà không cần khởi động lại hệ thống, nhờ cơ chế **shared state** lưu vào `settings.json`.
+> **Lưu ý thiết kế:** Toàn bộ tham số được tách biệt hoàn toàn vào `config.py`. Khi cần tinh chỉnh cho một loại ảnh/domain cụ thể (ví dụ: ảnh chụp menu nhà hàng vs. biển số xe), chỉ cần sửa `config.py` mà không cần đụng vào logic xử lý.
