@@ -1,3 +1,4 @@
+
 """
 ocr.py — VNCV OCR pipeline (standalone, no extra project deps).
 Public API:

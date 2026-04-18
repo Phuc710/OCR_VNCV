@@ -1,59 +1,103 @@
-# OCR VNCV Dashboard 🚀
+# 🚀 OCR VNCV: Giải pháp nhận dạng hóa đơn Tiếng Việt chuyên sâu
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=flat&logo=fastapi)](https://fastapi.tiangolo.com)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
-Một giải pháp nhận dạng ký tự quang học (OCR) chuyên biệt cho Tiếng Việt, tập trung vào việc trích xuất dữ liệu từ các dòng hóa đơn bán lẻ (Receipts). Hệ thống đi kèm với Dashboard quản lý trực quan và API hiệu năng cao.
+**OCR VNCV** là một hệ thống nhận dạng ký tự quang học mạnh mẽ, được tối ưu hóa đặc biệt cho tiếng Việt và các loại hóa đơn bán lẻ (Receipts). Project tích hợp giữa engine OCR AI tiên tiến và giao diện Dashboard hiện đại, giúp việc trích xuất dữ liệu trở nên nhanh chóng và chính xác.
+
+---
+
+## 📸 Demo & Giao diện
+
+### Web Dashboard
+Giao diện trực quan hỗ trợ kéo thả ảnh, xem trước và hiển thị kết quả trích xuất theo thời gian thực.
+![Web Dashboard](file:///c:/Users/Phucc/Desktop/job/M%E1%BA%A1nh/img_demo/UI.png)
+
+### Kết quả nhận dạng mẫu
+Hệ thống xử lý tốt các loại hóa đơn in nhiệt, chữ mờ hoặc ảnh chụp trong điều kiện ánh sáng không lý tưởng.
+![OCR Test](file:///c:/Users/Phucc/Desktop/job/M%E1%BA%A1nh/img_demo/test.png)
+
+---
 
 ## ✨ Tính năng nổi bật
 
-- **Nhận diện Tiếng Việt chuyên sâu:** Tối ưu hóa cho các font chữ hóa đơn in nhiệt và văn bản hành chính.
-- **Pipeline xử lý thông minh:** Tự động điều chỉnh giữa hai chế độ xử lý **Standard** (Tiêu chuẩn) và **Aggressive** (Nâng cao) dựa trên độ tin cậy của ảnh.
-- **Tiền xử lý nâng cao:** Tích hợp bộ lọc khử nhiễu, tăng độ tương phản và tự động cân chỉnh hướng ảnh.
-- **Web Dashboard:** Giao diện kéo thả hiện đại, hỗ trợ xem trước ảnh và hiển thị kết quả thời gian thực.
+- **🔤 Tối ưu Tiếng Việt:** Xử lý chính xác các ký tự có dấu, font chữ hóa đơn đặc thù và các cấu trúc văn bản hành chính Việt Nam.
+- **⚙️ Pipeline Dual-Mode (Thông minh):** 
+  - **Standard Mode:** Ưu tiên tốc độ, xử lý ảnh chất lượng tốt.
+  - **Aggressive Mode:** Tự động kích hoạt khi ảnh mờ/nhiễu, áp dụng bộ lọc tăng cường độ tương phản và binarization để cứu vãn thông tin.
+- **🖼️ Tiền xử lý ảnh nâng cao:** Tích hợp Unsharp Mask, Autocontrast, Resizing thông minh giúp cải thiện đáng kể tỷ lệ nhận diện.
+- **🌐 RESTful API:** Cung cấp endpoint dễ dàng tích hợp vào các hệ thống quản lý tài chính hoặc ứng dụng di động.
+- **⚡ Hiệu năng cao:** Tối ưu hóa thời gian phản hồi (average ~5s trên CPU) nhờ cơ chế warm-up model và xử lý bất đồng bộ.
 
-## 📊 Hiệu năng thực tế (Benchmarks)
+---
 
-Dựa trên kết quả thực nghiệm với 4 mẫu hóa đơn đại diện (`cafe.png`, `image.png`, `3.png`, `222.jpg`):
+## 🛠️ Cài đặt & Triển khai
 
-| Chỉ số | Kết quả trung bình | Đánh giá |
-| :--- | :--- | :--- |
-| **Độ tin cậy (Confidence)** | **83.72%** | Hoạt động tốt trên cả ảnh chất lượng trung bình |
-| **Tốc độ xử lý (Latency)** | **5.37 giây** | Phản hồi nhanh trên môi trường CPU |
-| **Độ chính xác (Accuracy)** | **91.5%** | Tỉ lệ trích xuất đúng các trường thông tin chính |
+### 1. Yêu cầu hệ thống
+- Python 3.10 trở lên.
+- Thư viện `vncv` (đã được cấu hình trong `requirements.txt`).
 
-## 🛠️ Cài đặt & Chạy ứng dụng
-
-### 1. Cài đặt môi trường
-Đảm bảo bạn đã cài đặt Python 3.10 trở lên.
+### 2. Cài đặt chi tiết
 ```bash
-# Tạo môi trường ảo (Khuyến khích)
-python -m venv venv
-source venv/bin/activate  # Trên Linux/Mac
-.\venv\Scripts\activate   # Trên Windows
+# Clone project và đi vào thư mục
+# cd OCR_VNCV
 
-# Cài đặt các thư viện phụ thuộc
+# Tạo và kích hoạt môi trường ảo
+python -m venv venv
+.\venv\Scripts\activate  # Windows
+# source venv/bin/activate # Linux/Mac
+
+# Cài đặt các thư viện cần thiết
 pip install -r requirements.txt
 ```
 
-### 2. Chạy ứng dụng
-Khởi động Backend FastAPI:
+### 3. Khởi chạy
+Chạy server FastAPI:
 ```bash
+# Chạy trực tiếp qua main.py
 python main.py
+
+# Hoặc dùng uvicorn thủ công
+python -m uvicorn main:app --reload --port 8000
 ```
-Ứng dụng sẽ chạy tại địa chỉ: `http://127.0.0.1:8000`
-
-## 📁 Cấu trúc dự án
-
-- `main.py`: Điểm khởi đầu của ứng dụng FastAPI.
-- `ocr.py`: Pipeline xử lý OCR và Tiền xử lý ảnh.
-- `router.py`: Định nghĩa các API endpoints.
-- `config.py`: Các tham số cấu hình hệ thống.
-- `web/`: Chứa mã nguồn Giao diện Dashboard (HTML/CSS/JS).
-- `chapter_4_report.md`: Báo cáo thực nghiệm chi tiết.
-
-## 🤝 Autor
-Dự án được thực hiện bởi **Phuc710**.
+Truy cập Dashboard tại: [http://127.0.0.1:8000](http://127.0.0.1:8000)
 
 ---
-*Dữ liệu và mã nguồn được đóng gói phục vụ cho mục đích nghiên cứu và đào tạo.*
+
+## 🔌 API Documentation
+
+### OCR Endpoint
+`POST /api/ocr`
+
+**Request:** `multipart/form-data` với field `file` (ảnh JPEG, PNG, WEBP).
+
+**Response:**
+```json
+{
+  "text": "TÊN CỬA HÀNG\nĐỊA CHỈ: ...\nSỐ TIỀN: 50.000 VNĐ",
+  "confidence": 0.8945,
+  "mode": "standard",
+  "elapsed_ms": 1205.4,
+  "char_count": 145
+}
+```
+
+---
+
+## 📁 Cấu trúc thư mục chính
+
+- `main.py`: Entry point, khởi tạo ứng dụng và mount router.
+- `ocr.py`: Trái tim của hệ thống - Chứa logic tiền xử lý và pipeline OCR vncv.
+- `router.py`: Định nghĩa các API endpoints và phục vụ static files cho Dashboard.
+- `web/`: Toàn bộ mã nguồn giao diện (HTML/CSS/JS).
+- `config.py`: Các tham số tinh chỉnh (Threshold, Contrast, Resize limits).
+- `img_demo/`: Chứa các hình ảnh minh họa cho README.
+
+---
+
+## 👤 Tác giả
+Dự án được phát triển bởi **Phuc710**. 
+
+---
+*Ghi chú: Project này được xây dựng phục vụ mục đích học tập và nghiên cứu công nghệ OCR tại Việt Nam.*
