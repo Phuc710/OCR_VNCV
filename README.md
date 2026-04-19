@@ -12,11 +12,11 @@
 
 ### Web Dashboard
 Giao diện trực quan hỗ trợ kéo thả ảnh, xem trước và hiển thị kết quả trích xuất theo thời gian thực.
-![Web Dashboard](file:///c:/Users/Phucc/Desktop/job/M%E1%BA%A1nh/img_demo/UI.png)
+![Web Dashboard](img_demo/UI.png)
 
 ### Kết quả nhận dạng mẫu
 Hệ thống xử lý tốt các loại hóa đơn in nhiệt, chữ mờ hoặc ảnh chụp trong điều kiện ánh sáng không lý tưởng.
-![OCR Test](file:///c:/Users/Phucc/Desktop/job/M%E1%BA%A1nh/img_demo/test.png)
+![OCR Test](img_demo/test.png)
 
 ---
 
